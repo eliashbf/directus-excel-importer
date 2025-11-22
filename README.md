@@ -167,17 +167,17 @@ docker run -p 8055:8055 \
 
 4. **Paso 2:** El sistema leerá las cabeceras de tu Excel. Mapea cada columna del Excel con el campo correspondiente en Directus.
 
-- - Tip: Si dejas una columna en blanco, esa columna del Excel será ignorada.
+    - Tip: Si dejas una columna en blanco, esa columna del Excel será ignorada.
 
 5. **Paso 3 (Validación):** Haz clic en "Validar Datos". El sistema procesará el archivo sin guardarlo.
 
-- - Si hay errores (ej. texto en un campo numérico o una relación no encontrada), te mostrará en qué filas ocurren.
+    -  Si hay errores (ej. texto en un campo numérico o una relación no encontrada), te mostrará en qué filas ocurren.
 
 6. **Paso 4 (Importación):**
 
-- - Si todo es correcto, pulsa "Importar".
+    -  Si todo es correcto, pulsa "Importar".
 
-- - Si hay errores parciales, puedes elegir "Importar solo filas válidas".
+    -  Si hay errores parciales, puedes elegir "Importar solo filas válidas".
 
 ## ⚙️ Detalles Técnicos del Backend
 
@@ -185,16 +185,16 @@ La extensión utiliza dos rutas principales definidas en `src/index.ts`:
 
 1. `POST /excel-importer-api/validate`:
 
-- Inicia una transacción de base de datos.
+    - Inicia una transacción de base de datos.
 
-- Procesa el Excel e intenta insertar los registros.
+    - Procesa el Excel e intenta insertar los registros.
 
-- Captura errores por fila.
+    - Captura errores por fila.
 
-- **Siempre hace ROLLBACK** de la transacción al final, por lo que no se guardan datos, solo se verifica la integridad.
+    - **Siempre hace ROLLBACK** de la transacción al final, por lo que no se guardan datos, solo se verifica la integridad.
 
 2. `POST /excel-importer-api/import`:
 
-- Realiza el mismo proceso que la validación.
+    - Realiza el mismo proceso que la validación.
 
-- Si la validación es exitosa (o si se permite importación parcial), realiza el `createMany` y **confirma (COMMIT)** los datos en la base de datos.
+    - Si la validación es exitosa (o si se permite importación parcial), realiza el `createMany` y **confirma (COMMIT)** los datos en la base de datos.
