@@ -1,0 +1,35 @@
+{
+	"name": "excel-importer-ui",
+	"description": "Extension para importar datos desde archivos Excel en Directus",
+	"icon": "extension",
+	"version": "1.0.0",
+	"keywords": [
+		"directus",
+		"directus-extension",
+		"directus-extension-module"
+	],
+	"type": "module",
+	"files": [
+		"dist"
+	],
+	"directus:extension": {
+		"type": "module",
+		"path": "dist/index.js",
+		"source": "src/index.ts",
+		"host": "^10.10.0"
+	},
+	"scripts": {
+		"build": "directus-extension build",
+		"dev": "directus-extension build -w --no-minify",
+		"link": "directus-extension link",
+		"validate": "directus-extension validate"
+	},
+	"devDependencies": {
+		"@directus/extensions-sdk": "17.0.2",
+		"typescript": "^5.9.3",
+		"vue": "^3.5.24"
+	},
+	"dependencies": {
+		"xlsx": "^0.18.5"
+	}
+}

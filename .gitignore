@@ -1,0 +1,15 @@
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+
+# Directus (Docker volumes)
+database/
+uploads/
+
+# Carpeta de construcción para producción (generada por el script del README)
+production-extensions/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
