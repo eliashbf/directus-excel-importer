@@ -8,15 +8,23 @@ Esta extensión añade la funcionalidad de importar datos masivos desde archivos
 
 - **Carga de Archivos:** Soporte para arrastrar y soltar archivos Excel.
 
+- **Limpieza Automática:** Detecta e ignora automáticamente filas vacías en el archivo.
+
 - **Mapeo de Columnas:** Interfaz visual para asignar columnas del Excel a campos de Directus.
 
+- **Gestión de Duplicados:**
+  - Permite seleccionar un **Campo Identificador** (ej: RUT, Email, SKU) para detectar registros existentes.
+  
+  - **Estrategias de Importación:**
+    - **Mostrar Error:** Si existe, detiene el proceso (comportamiento por defecto).
+    - **Omitir (Skip):** Ignora el registro del Excel y conserva el de la base de datos.
+    - **Actualizar (Update):** Sobrescribe el registro existente con los datos del Excel.
+
 - **Validación Inteligente:**
+    * Verifica tipos de datos (Números, Fechas, Booleanos).
+    * **Relaciones (M2O):** Busca automáticamente el ID de un registro relacionado basándose en el valor de la celda.
 
-    *  Verifica tipos de datos (Números, Fechas, Booleanos).
-
-    * **Relaciones (M2O):** Busca automáticamente el ID de un registro relacionado basándose en el valor de la celda (busca por ID, o campos comunes como name o sku).
-
-    * Simulación de importación (Transacción SQL con Rollback) para detectar errores sin corromper la base de datos.
+- **Seguridad de Datos:** Validación mediante transacciones SQL simuladas (Rollback) para asegurar que no se corrompan datos si hay errores.
 
 - **Importación Flexible:** Opción para importar todo o solo las filas válidas (importación parcial).
 
@@ -138,8 +146,10 @@ cp extensions/excel-importer-ui/dist/index.js production-extensions/excel-import
 
 Ahora que la carpeta `production-extensions` tiene los archivos compilados, puedes construir la imagen final.
 
+**Nota** para usuarios de Mac (Apple Silicon/M1/M2): Si vas a desplegar en Cloud Run u otro servidor Linux estándar, usa el flag `--platform linux/amd64`.
+
 ```bash
-docker build -t directus-con-excel-importer:latest -f Dockerfile .
+docker build -t directus-excel-import:latest -f Dockerfile .
 ```
 
 **4. Ejecutar la Imagen de Producción**
@@ -152,7 +162,7 @@ docker run -p 8055:8055 \
   -e ADMIN_PASSWORD=password \
   -e DB_CLIENT=sqlite3 \
   -e DB_FILENAME=/directus/database/data.db \
-  directus-con-excel-importer:latest
+  directus-excel-import:latest
 ```
 
 ## 📖 Cómo Usar la Extensión
@@ -165,11 +175,23 @@ docker run -p 8055:8055 \
 
 3. **Paso 1:** Selecciona la Colección de destino en el menú desplegable y carga tu archivo `.xlsx`.
 
-4. **Paso 2:** El sistema leerá las cabeceras de tu Excel. Mapea cada columna del Excel con el campo correspondiente en Directus.
+4. **Paso 2 (Configuración):**
 
-    - Tip: Si dejas una columna en blanco, esa columna del Excel será ignorada.
+    - **Campo Identificador:** (Opcional) Selecciona qué columna es única (ej: RUT). Si se deja vacío, siempre creará registros nuevos.
 
-5. **Paso 3 (Validación):** Haz clic en "Validar Datos". El sistema procesará el archivo sin guardarlo.
+    - **Estrategia:** Si seleccionaste un identificador, elige qué hacer si el registro ya existe: Mostrar Error, Omitir o Actualizar.
+
+    - **Mapeo:** Asigna las columnas del Excel a los campos de Directus.
+
+5. **Paso 3 (Validación):** Haz clic en "Validar Datos". El sistema procesará el archivo sin guardarlo. Veras un resumen de:
+
+    - Nuevos a crear.
+
+    - Registros a actualizar.
+
+    - Registros a omitir (duplicados).
+
+    - Errores encontrados.
 
     -  Si hay errores (ej. texto en un campo numérico o una relación no encontrada), te mostrará en qué filas ocurren.
 

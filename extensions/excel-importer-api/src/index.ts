@@ -16,12 +16,11 @@ export default defineEndpoint((router, { services, database, getSchema }) => {
    */
   router.post('/validate', async (req: any, res) => {
     try {
-      const { collection, mappings, fileBuffer } = await parseFormData(req);
-      
+      const { collection, mappings, fileBuffer, identifierField, importStrategy } = await parseFormData(req);
+
       const schema = await getSchema();
 
-      // ¡Pasamos 'database' (Knex) a processExcel!
-      const { validData, errors } = await processExcel(
+      const { validData, errors, updatedCount, skippedCount } = await processExcel(
         fileBuffer,
         collection,
         mappings,
@@ -29,11 +28,15 @@ export default defineEndpoint((router, { services, database, getSchema }) => {
         services,
         req.accountability,
         database,
-        true
+        true,
+        identifierField,
+        importStrategy
       );
-      
+
       res.json({
         validCount: validData.length,
+        updatedCount,
+        skippedCount,
         errorCount: errors.length,
         errors: errors,
       });
@@ -52,10 +55,10 @@ export default defineEndpoint((router, { services, database, getSchema }) => {
     const isPartialImport = req.query.partial === 'true';
 
     try {
-      const { collection, mappings, fileBuffer } = await parseFormData(req);
+      const { collection, mappings, fileBuffer, identifierField, importStrategy } = await parseFormData(req);
       const schema = await getSchema();
 
-      const { validData, errors } = await processExcel(
+      const { validData, errors, updatedCount, skippedCount } = await processExcel(
         fileBuffer,
         collection,
         mappings,
@@ -63,26 +66,20 @@ export default defineEndpoint((router, { services, database, getSchema }) => {
         services,
         req.accountability,
         database,
-        false
+        false,
+        identifierField,
+        importStrategy
       );
-      
+
       // Si NO es importación parcial y hay errores, rechazar.
       if (!isPartialImport && errors.length > 0) {
         return res.status(400).json({ error: 'Hay errores, no se puede importar.' });
       }
-      
-      if (validData.length === 0) {
-        return res.json({ createdCount: 0 });
-      }
-      
-      const itemsService = new ItemsService(collection, {
-        schema: schema,
-        accountability: req.accountability,
-      });
-      await itemsService.createMany(validData);
 
       return res.json({
         createdCount: validData.length,
+        updatedCount: updatedCount,
+        skippedCount: skippedCount,
         errors: errors
       });
 
@@ -97,12 +94,20 @@ export default defineEndpoint((router, { services, database, getSchema }) => {
 /**
  * Parsea el 'multipart/form-data' desde el stream req y bufferea el archivo.
  */
-function parseFormData(req: any): Promise<{ collection: string, mappings: Record<string, string>, fileBuffer: Buffer }> {
+function parseFormData(req: any): Promise<{
+  collection: string,
+  mappings: Record<string, string>,
+  fileBuffer: Buffer,
+  identifierField: string | null,
+  importStrategy: string
+}> {
   return new Promise((resolve, reject) => {
-    
+
     const bb = busboy({ headers: req.headers });
     let collection: string = '';
     let mappings: Record<string, string> = {};
+    let identifierField: string | null = null;
+    let importStrategy: string = 'error'; // Por defecto
     let fileBuffer: Buffer | null = null;
 
     bb.on('file', (name, file, _) => {
@@ -118,12 +123,14 @@ function parseFormData(req: any): Promise<{ collection: string, mappings: Record
     bb.on('field', (name, val) => {
       if (name === 'collection') collection = val;
       if (name === 'mappings') mappings = JSON.parse(val);
+      if (name === 'identifierField') identifierField = val === 'null' || val === '' ? null : val;
+      if (name === 'importStrategy') importStrategy = val;
     });
     bb.on('close', () => {
       if (!fileBuffer || !collection || !mappings) {
         return reject(new Error('Faltan datos en el formulario (archivo, colección, mapeo o archivo vacío).'));
       }
-      resolve({ collection, mappings, fileBuffer });
+      resolve({ collection, mappings, fileBuffer, identifierField, importStrategy });
     });
     bb.on('error', reject);
     req.pipe(bb);
@@ -142,78 +149,150 @@ async function processExcel(
   services: any,
   accountability: Accountability | null,
   database: Knex,
-  isValidationOnly: boolean
+  isValidationOnly: boolean,
+  identifierField: string | null,
+  importStrategy: string
 ) {
   const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
   const sheetName = workbook.SheetNames[0]!;
   const worksheet = workbook.Sheets[sheetName]!;
-  const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
+  let jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
 
-  if (jsonData.length < 2) throw new Error('El archivo Excel está vacío o no tiene cabeceras.');
+  jsonData = jsonData.filter(row => {
+    if (!row || row.length === 0) return false;
+    return row.some(cell => cell !== null && cell !== undefined && cell !== '');
+  });
+
+  if (jsonData.length < 2) throw new Error('El archivo Excel está vacío o no tiene cabeceras válidas.');
 
   const headers = jsonData[0] as string[];
   const rows = jsonData.slice(1);
 
   const validData: any[] = [];
   const errors: { row: number; message: string }[] = [];
-  
+  let updatedCount = 0;
+  let skippedCount = 0;
+
   const collectionSchema = schema.collections[collection];
   if (!collectionSchema) throw new Error(`Colección "${collection}" no encontrada.`);
 
-  const itemsServiceFactory = (collectionName: string, trx: Knex.Transaction | null = null): ItemsService => {
+  const readOnlyServiceFactory = (collectionName: string): ItemsService => {
     return new services.ItemsService(collectionName, {
       schema: schema,
       accountability: accountability,
-      knex: trx || database // Usa la transacción si se provee
+      knex: database
     });
   };
 
-  // Si solo estamos validando, creamos una transacción que podamos revertir
-  const trx = isValidationOnly ? await database.transaction() : null;
-  
-  // Creamos un servicio de items atado a ESTA transacción (si existe)
-  const validationService = itemsServiceFactory(collection, trx);
-  
+  // Cache para recordar lo que acabamos de procesar en este loop
+  // Key: Valor del Identificador (ej: el RUT), Value: El ID primario (ID de la BD)
+  const processedCache = new Map<string, string | number>();
+
+  const trx = await database.transaction();
+  const readService = readOnlyServiceFactory(collection);
+
   try {
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i] as any[];
       const excelRowNumber = i + 2;
-      
+
       const { item, errorMessages: prepErrors } = await prepareRow(
-        row, headers, mappings, collectionSchema, itemsServiceFactory
+        row, headers, mappings, collectionSchema, readOnlyServiceFactory
       );
 
       if (prepErrors.length > 0) {
-        // Error de preparación (ej: relación no encontrada, tipo de dato incorrecto)
         errors.push(...prepErrors.map(msg => ({ row: excelRowNumber, message: msg })));
         continue;
       }
 
-      if (isValidationOnly) {
-        try {
-          await validationService.createOne(item);
-          validData.push(item);
-        } catch (err: any) {
-          const errorMessage = (err.message || String(err));
-          errors.push({ row: excelRowNumber, message: errorMessage.replace('Validation failed. ', '') });
+      let existingId: string | number | null = null;
+
+      if (identifierField && item[identifierField] !== undefined) {
+        const idValue = String(item[identifierField]); // Convertimos a string para usar de Key
+
+        // Primero buscamos en nuestra caché local (¿Lo acabamos de insertar/ver?)
+        if (processedCache.has(idValue)) {
+          existingId = processedCache.get(idValue)!;
+        } else {
+          // Si no, buscamos en la BD real
+          try {
+            const existingRecords = await readService.readByQuery({
+              filter: { [identifierField]: { _eq: item[identifierField] } },
+              limit: 1,
+              fields: [collectionSchema.primary]
+            });
+            if (existingRecords.length > 0) {
+              existingId = existingRecords[0][collectionSchema.primary];
+              // Lo guardamos en caché para la próxima vez que aparezca en este Excel
+              processedCache.set(idValue, existingId!);
+            }
+          } catch (e: any) {
+            errors.push({ row: excelRowNumber, message: `Error buscando duplicados: ${e.message}` });
+            continue;
+          }
         }
-      } else {
-        validData.push(item);
+      }
+
+      try {
+        await trx.transaction(async (rowTrx) => {
+          const rowService = new services.ItemsService(collection, {
+            schema: schema,
+            accountability: accountability,
+            knex: rowTrx
+          });
+
+          if (existingId) {
+            // ESTRATEGIA: ACTUALIZAR O SALTAR
+            if (importStrategy === 'error') {
+              throw new Error(`Registro duplicado (Campo: ${identifierField}, Valor: ${item[identifierField]})`);
+            } else if (importStrategy === 'skip') {
+              return;
+            } else if (importStrategy === 'update') {
+              await rowService.updateOne(existingId, item);
+            }
+          } else {
+            // ESTRATEGIA: CREAR NUEVO
+            // Guardamos el resultado para obtener el ID generado
+            const newId = await rowService.createOne(item);
+
+            // Agregamos este nuevo registro a la caché local.
+            // Si otra fila más abajo tiene el mismo RUT, ahora sabrá que ya existe (y su ID).
+            if (identifierField && item[identifierField]) {
+              processedCache.set(String(item[identifierField]), newId);
+            }
+          }
+        });
+
+        if (existingId) {
+          if (importStrategy === 'update') updatedCount++;
+          if (importStrategy === 'skip') skippedCount++;
+        } else {
+          validData.push(item);
+        }
+
+      } catch (err: any) {
+        const msg = (err.message || String(err)).replace('Validation failed. ', '');
+        if (importStrategy === 'error' && existingId) {
+          errors.push({ row: excelRowNumber, message: msg });
+        } else {
+          errors.push({ row: excelRowNumber, message: msg });
+        }
       }
     }
+
+    if (isValidationOnly) {
+      await trx.rollback();
+    } else {
+      await trx.commit();
+    }
+
   } catch (globalErr: any) {
-    console.error('[EXCEL-IMPORTER-API] Error global en processExcel:', globalErr);
-    if (trx) await trx.rollback();
-    throw globalErr;
+    if (!trx.isCompleted()) await trx.rollback();
+    if (!isValidationOnly) throw globalErr;
   }
 
-  if (trx) {
-    await trx.rollback();
-  }
-
-  return { validData, errors };
+  return { validData, errors, updatedCount, skippedCount };
 }
-
 
 /**
  * Prepara la fila (mapea, convierte tipos, busca relaciones)
@@ -223,9 +302,9 @@ async function prepareRow(
   headers: string[],
   mappings: Record<string, string>,
   collectionSchema: any,
-  itemsServiceFactory: (collection: string, trx?: Knex.Transaction) => ItemsService
+  readOnlyServiceFactory: (collection: string) => ItemsService
 ): Promise<{ item: any; errorMessages: string[] }> {
-  
+
   const item: any = {};
   const errorMessages: string[] = [];
 
@@ -239,10 +318,10 @@ async function prepareRow(
 
   for (const fieldName in item) {
     if (!collectionSchema.fields[fieldName]) continue;
-    
+
     const fieldSchema = collectionSchema.fields[fieldName];
     let value = item[fieldName];
-    
+
     if (value === null || value === undefined || value === '') {
       item[fieldName] = null;
       continue;
@@ -257,7 +336,7 @@ async function prepareRow(
           }
           item[fieldName] = Number(value);
           break;
-        
+
         case 'float':
         case 'decimal':
           if (isNaN(Number(value))) {
@@ -302,22 +381,22 @@ async function prepareRow(
 
     const isM2O = fieldSchema.special?.includes('m2o');
     const relatedCollection = fieldSchema.meta?.related_collection;
-    
+
     if (isM2O && relatedCollection) {
-      const relatedService = itemsServiceFactory(relatedCollection);
-      
+      const relatedService = readOnlyServiceFactory(relatedCollection);
+
       try {
         let foundItem: any = null;
-        try { foundItem = await relatedService.readOne(value); } catch(e) {}
+        try { foundItem = await relatedService.readOne(value); } catch (e) { }
         if (!foundItem) {
-           const items = await relatedService.readByQuery({ filter: { name: { _eq: value } }, limit: 1 });
-           if (items.length > 0) foundItem = items[0];
+          const items = await relatedService.readByQuery({ filter: { name: { _eq: value } }, limit: 1 });
+          if (items.length > 0) foundItem = items[0];
         }
         if (!foundItem) {
-           const items = await relatedService.readByQuery({ filter: { sku: { _eq: value } }, limit: 1 });
-           if (items.length > 0) foundItem = items[0];
+          const items = await relatedService.readByQuery({ filter: { sku: { _eq: value } }, limit: 1 });
+          if (items.length > 0) foundItem = items[0];
         }
-        
+
         if (foundItem) {
           item[fieldName] = foundItem.id;
         } else {
